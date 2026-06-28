@@ -59,7 +59,14 @@ COLOUR_FAILED  = 0x95A5A6
 def fetch_csv(url):
     r = requests.get(url, timeout=120)
     r.raise_for_status()
-    return r.content.decode("utf-8", errors="replace")
+    print(f"  Fetched {len(r.content):,} bytes, Content-Type: {r.headers.get('Content-Type')}")
+    # Use utf-8-sig to transparently strip a leading BOM if present —
+    # CSV exports from many backends include one, which would otherwise
+    # make the header row look like '﻿GTIN' instead of 'GTIN' and
+    # silently break header detection below.
+    text = r.content.decode("utf-8-sig", errors="replace")
+    print(f"  First 200 chars of decoded CSV: {text[:200]!r}")
+    return text
 
 
 def _safe_int(val):
@@ -78,10 +85,17 @@ def parse_catalog_csv(csv_text):
     lines = csv_text.splitlines()
     header_idx = None
     for i, line in enumerate(lines):
-        if line.strip().startswith("GTIN"):
+        # Strip BOM/whitespace defensively even though fetch_csv already
+        # decodes with utf-8-sig — cheap insurance against double-encoding.
+        cleaned = line.strip().lstrip("﻿")
+        if cleaned.upper().startswith("GTIN"):
             header_idx = i
             break
     if header_idx is None:
+        print(f"  [!] Could not find a header row starting with GTIN in {len(lines)} lines")
+        print(f"  [!] First 5 raw lines for inspection:")
+        for l in lines[:5]:
+            print(f"      {l!r}")
         return []
 
     reader = csv.DictReader(io.StringIO("\n".join(lines[header_idx:])))
