@@ -85,14 +85,16 @@ def parse_catalog_csv(csv_text):
     lines = csv_text.splitlines()
     header_idx = None
     for i, line in enumerate(lines):
-        # Strip BOM/whitespace defensively even though fetch_csv already
-        # decodes with utf-8-sig — cheap insurance against double-encoding.
-        cleaned = line.strip().lstrip("﻿")
-        if cleaned.upper().startswith("GTIN"):
+        # Real header lines look like '"GTIN","Name",...' — quoted CSV,
+        # so a strict startswith("GTIN") check (even after stripping
+        # BOM/whitespace) never matches, since the actual first char is
+        # a literal quote. Checking for GTIN anywhere near the start of
+        # the line sidesteps quoting/BOM edge cases entirely.
+        if "GTIN" in line[:10].upper():
             header_idx = i
             break
     if header_idx is None:
-        print(f"  [!] Could not find a header row starting with GTIN in {len(lines)} lines")
+        print(f"  [!] Could not find a header row containing GTIN in {len(lines)} lines")
         print(f"  [!] First 5 raw lines for inspection:")
         for l in lines[:5]:
             print(f"      {l!r}")
