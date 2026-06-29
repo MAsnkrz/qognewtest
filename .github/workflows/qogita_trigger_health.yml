@@ -33,5 +33,5 @@ jobs:
         env:
           QOGITA_EMAIL:    ${{ secrets.QOGITA_EMAIL }}
           QOGITA_PASSWORD: ${{ secrets.QOGITA_PASSWORD }}
-          CATEGORY_SLUG: "health"
+          TOP_LEVEL_CATEGORY: "Health"
         run: python qogita_catalog_trigger.py
