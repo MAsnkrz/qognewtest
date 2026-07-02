@@ -341,8 +341,9 @@ def snapshot_entry(product):
         "category":   product.get("category", ""),
         "price":      product.get("price", ""),
         "stock":      product.get("stock"),
-        "in_stock":   product.get("in_stock", True),
-        "first_seen": product.get("first_seen", datetime.now(timezone.utc).isoformat()),
+        "in_stock":           product.get("in_stock", True),
+        "last_alerted_price": product.get("last_alerted_price", ""),
+        "first_seen":         product.get("first_seen", datetime.now(timezone.utc).isoformat()),
         "last_updated": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -371,9 +372,16 @@ def check_changes(product, old):
     if old_f and new_f and old_f > 0:
         pct_change = (old_f - new_f) / old_f
         abs_change = old_f - new_f
-        if pct_change > 0.01 and abs_change > 0.02:
-            notify_price_change(product, old_price, new_price, pct_change)
-            time.sleep(1)
+        if pct_change > 0.05 and abs_change > 0.05:  # 5%+ AND £0.05+ absolute
+            # Guard against re-alerting the same drop twice when two runs
+            # overlap before the first run's snapshot commit lands in git.
+            last_alerted = old.get("last_alerted_price", "")
+            if last_alerted and abs(safe_float(last_alerted) or 0 - (new_f or 0)) < 0.01:
+                pass  # same price already alerted — skip
+            else:
+                product["last_alerted_price"] = new_price
+                notify_price_change(product, old_price, new_price, pct_change)
+                time.sleep(1)
 
 # ---------------------------------------------------------------------------
 # MAIN
