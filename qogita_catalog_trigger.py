@@ -24,7 +24,7 @@ otherwise this request is rejected with 400 no_webhook_subscriber.
 Env vars (set exactly ONE of these):
   TOP_LEVEL_CATEGORY - e.g. "Makeup" or "Health" (expands to all
                        descendant leaf slugs automatically)
-  BRAND_NAME         - e.g. "Maybelline" — for pipeline debugging
+  BRAND_NAME         - e.g. "Maybelline" (brand-filtered download)
 
 Also requires:
   QOGITA_EMAIL, QOGITA_PASSWORD - login credentials
@@ -43,12 +43,13 @@ EMAIL                = os.getenv("QOGITA_EMAIL", "")
 PASSWORD             = os.getenv("QOGITA_PASSWORD", "")
 TOP_LEVEL_CATEGORY  = os.getenv("TOP_LEVEL_CATEGORY", "")
 BRAND_NAME           = os.getenv("BRAND_NAME", "")
+ALL_CATEGORIES       = os.getenv("ALL_CATEGORIES", "false").lower() == "true"
 
 if not EMAIL or not PASSWORD:
     print("[!] QOGITA_EMAIL and QOGITA_PASSWORD must be set")
     sys.exit(1)
-if not TOP_LEVEL_CATEGORY and not BRAND_NAME:
-    print("[!] Set either TOP_LEVEL_CATEGORY (e.g. 'Makeup') or BRAND_NAME (e.g. 'Maybelline')")
+if not TOP_LEVEL_CATEGORY and not BRAND_NAME and not ALL_CATEGORIES:
+    print("[!] Set one of: TOP_LEVEL_CATEGORY, BRAND_NAME, or ALL_CATEGORIES=true")
     sys.exit(1)
 
 SESSION = requests.Session()
@@ -88,13 +89,16 @@ if TOP_LEVEL_CATEGORY:
     print(f"Fetching category tree to expand '{TOP_LEVEL_CATEGORY}' into descendant slugs...")
     all_categories = fetch_all_categories()
 
-    # Every category whose path contains TOP_LEVEL_CATEGORY at index 1
-    # (immediately under the root "Health & Beauty" / "Home & Garden"
-    # level) is a descendant we want — this naturally includes the
-    # target category itself plus every leaf beneath it, at any depth.
+    # A category is a "descendant" of TOP_LEVEL_CATEGORY if that name
+    # appears anywhere in its path — this covers both:
+    #   - TOP_LEVEL_CATEGORY being the absolute root (e.g. "Health &
+    #     Beauty", path[0]) - matches everything under it, and
+    #   - TOP_LEVEL_CATEGORY being a second-level grouping (e.g.
+    #     "Makeup", path[1] under "Health & Beauty") - matches only
+    #     that branch, as used by the Makeup/Health monitors.
     descendant_slugs = [
         c["slug"] for c in all_categories
-        if len(c.get("path", [])) >= 2 and c["path"][1] == TOP_LEVEL_CATEGORY
+        if TOP_LEVEL_CATEGORY in c.get("path", [])
     ]
 
     if not descendant_slugs:
