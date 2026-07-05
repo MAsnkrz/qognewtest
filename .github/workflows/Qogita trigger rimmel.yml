@@ -1,0 +1,33 @@
+name: Qogita Rimmel Catalog Trigger
+
+on:
+  schedule:
+    - cron: "25 */2 * * *"   # every 2 hours, offset from others
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Trigger catalog download
+        env:
+          QOGITA_EMAIL:    ${{ secrets.QOGITA_EMAIL }}
+          QOGITA_PASSWORD: ${{ secrets.QOGITA_PASSWORD }}
+          BRAND_NAME: "Rimmel"
+        run: python qogita_catalog_trigger.py
