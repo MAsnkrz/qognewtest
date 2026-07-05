@@ -57,6 +57,10 @@ COLOUR_NEW     = 0xE91E8C
 COLOUR_BACK    = 0x9B59B6
 COLOUR_FAILED  = 0x95A5A6
 
+# Discord role to ping for exceptional (25%+) price drops
+FNF_ROLE_ID = "1019772687528235099"
+FNF_MENTION = f"<@&{FNF_ROLE_ID}>"
+
 # ---------------------------------------------------------------------------
 # CSV FETCH + PARSE
 # ---------------------------------------------------------------------------
@@ -157,12 +161,24 @@ def safe_float(val):
         return None
 
 
-def selleramp_url(barcode, cost_price_str):
+def selleramp_url_ean(barcode, cost_price_str):
+    """SAS lookup by EAN/GTIN barcode."""
     if not barcode:
         return None
     return (
         f"https://sas.selleramp.com/sas/lookup/"
         f"?search_term={barcode}&sas_cost_price={vat_price(cost_price_str)}"
+    )
+
+
+def selleramp_url_title(title, cost_price_str):
+    """SAS lookup by product title (URL-encoded)."""
+    if not title:
+        return None
+    from urllib.parse import quote as _quote
+    return (
+        f"https://sas.selleramp.com/sas/lookup/"
+        f"?search_term={_quote(title)}&sas_cost_price={vat_price(cost_price_str)}"
     )
 
 # ---------------------------------------------------------------------------
@@ -171,6 +187,7 @@ def selleramp_url(barcode, cost_price_str):
 
 def _base_fields(product):
     barcode        = product.get("barcode", "")
+    title          = product.get("title", "")
     stock          = product.get("stock")
     cheapest_stock = product.get("cheapest_stock")
     in_stock       = product.get("in_stock", True)
@@ -178,7 +195,8 @@ def _base_fields(product):
     brand          = product.get("brand", "")
     category       = product.get("category", "")
     price          = product.get("price", "")
-    sas_url        = selleramp_url(barcode, price)
+    sas_ean   = selleramp_url_ean(barcode, price)
+    sas_title = selleramp_url_title(title, price)
 
     if stock is not None:
         stock_val = f"**{stock:,} units**"
@@ -195,13 +213,17 @@ def _base_fields(product):
         {"name": "📊 Cheapest Offer Stock", "value": f"{cheapest_stock:,} units" if cheapest_stock is not None else "-", "inline": True},
         {"name": "🏭 Sellers",       "value": f"{all_offers}" if all_offers else "-", "inline": True},
     ]
-    if sas_url:
-        fields.append({"name": "🔍 SellerAmp SAS", "value": f"[Open in SellerAmp]({sas_url})", "inline": False})
+    if sas_title:
+        fields.append({"name": "🔍 SAS Title", "value": f"[Search by title]({sas_title})", "inline": True})
+    if sas_ean:
+        fields.append({"name": "🔍 SAS EAN", "value": f"[Search by barcode]({sas_ean})", "inline": True})
     return fields
 
 
-def _send_embed(embed):
+def _send_embed(embed, content=None):
     payload = {"embeds": [embed]}
+    if content:
+        payload["content"] = content
     try:
         r = requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
         if r.status_code == 429:
@@ -270,7 +292,9 @@ def notify_price_change(product, old_price, new_price, pct_change):
     }
     t = _thumbnail(product)
     if t: embed["thumbnail"] = t
-    _send_embed(embed)
+    # Ping @fnf role for exceptional drops (25%+)
+    mention = FNF_MENTION if pct_change >= 0.25 else None
+    _send_embed(embed, content=mention)
     print(f"  Discord: PRICE DROP -{pct_display} — {product.get('title', '')[:50]}")
 
 
