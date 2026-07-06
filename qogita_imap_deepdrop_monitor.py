@@ -126,28 +126,25 @@ def fetch_latest_catalog_attachment(mail):
                     padded = encoded_part + "=" * (-len(encoded_part) % 4)
                     decoded = _json.loads(_b64.urlsafe_b64decode(padded))
                     href = decoded.get("href", "")
-                    # Only use if it looks like a catalog/download link
-                    if any(k in href.lower() for k in ["catalog", "download", ".xlsx", ".csv"]):
+                    # Must be the actual S3 catalog file, not a website link
+                    if "static.prod.qogita.com/files/downloads/" in href:
                         download_url = href
-                        print(f"  Decoded real download URL: {download_url[:100]}...")
+                        print(f"  Decoded real S3 download URL: {download_url[:100]}...")
                         break
                 except Exception as e:
-                    print(f"  Could not decode URL segment: {e}")
+                    continue
             if download_url:
                 break
 
-    # Fallback: look for direct S3 URLs
+    # Fallback: look for direct S3 URLs already in plain text
     if not download_url:
-        direct_patterns = [
+        direct = re.findall(
             r'https://static\.prod\.qogita\.com/files/downloads/[^\s<>"\']+',
-            r'https://[^\s<>"\']*qogita[^\s<>"\']*\.xlsx[^\s<>"\']*',
-        ]
-        for pattern in direct_patterns:
-            matches = re.findall(pattern, body_text, re.IGNORECASE)
-            if matches:
-                download_url = matches[0]
-                print(f"  Found direct download URL: {download_url[:100]}...")
-                break
+            body_text, re.IGNORECASE
+        )
+        if direct:
+            download_url = direct[0]
+            print(f"  Found direct S3 URL: {download_url[:100]}...")
 
     if not download_url:
         print("  Could not find download URL in email body.")
