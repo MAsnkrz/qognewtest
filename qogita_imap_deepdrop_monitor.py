@@ -65,58 +65,94 @@ def connect_gmail():
 def fetch_latest_catalog_attachment(mail):
     mail.select("INBOX")
 
-    # Diagnostic: show the 10 most recent emails regardless of sender
-    print("  Scanning last 10 emails in inbox for diagnostics...")
-    status, messages = mail.search(None, "ALL")
+    # Search for catalog download emails from Qogita
+    status, messages = mail.search(None, 'FROM "qogita.com" SUBJECT "catalog download is ready"')
     if status != "OK" or not messages[0]:
-        print("  Inbox appears empty or inaccessible")
-        return None, None
-
-    all_ids = messages[0].split()
-    print(f"  Total emails in inbox: {len(all_ids)}")
-
-    for eid in all_ids[-10:]:
-        _, msg_data = mail.fetch(eid, "(BODY[HEADER.FIELDS (FROM SUBJECT DATE)])")
-        if msg_data and msg_data[0]:
-            raw = msg_data[0][1].decode("utf-8", errors="replace").strip()
-            print(f"    {raw[:300]}")
-            print()
-
-    # Now search specifically for qogita.com in sender
-    print("  Searching for emails from qogita.com...")
-    status, messages = mail.search(None, 'FROM "qogita.com"')
+        # Fallback — broader search
+        status, messages = mail.search(None, 'FROM "qogita.com" SUBJECT "catalog"')
     if status != "OK" or not messages[0]:
-        print("  No emails found with FROM containing qogita.com")
+        print("  No Qogita catalog emails found.")
         return None, None
 
     email_ids = messages[0].split()
-    print(f"  Found {len(email_ids)} email(s) from qogita.com")
+    print(f"  Found {len(email_ids)} Qogita catalog email(s)")
 
-    for eid in reversed(email_ids[-5:]):
-        status, msg_data = mail.fetch(eid, "(RFC822)")
-        if status != "OK":
-            continue
+    # Process most recent unread, or most recent overall if all read
+    target_id = None
+    for eid in reversed(email_ids):
+        _, flag_data = mail.fetch(eid, "(FLAGS)")
+        flags = str(flag_data[0]) if flag_data and flag_data[0] else ""
+        if "\\Seen" not in flags:
+            target_id = eid
+            break
+    if target_id is None:
+        print("  All catalog emails already processed (marked as read).")
+        print("  Send a fresh catalog email from qogita.com to get new data.")
+        return None, None
 
-        msg = email.message_from_bytes(msg_data[0][1])
-        subject = msg.get("Subject", "")
-        sender  = msg.get("From", "")
-        print(f"  Checking: From={sender} | Subject={subject[:80]}")
+    status, msg_data = mail.fetch(target_id, "(RFC822)")
+    if status != "OK":
+        return None, None
 
-        for part in msg.walk():
-            content_disposition = str(part.get("Content-Disposition", ""))
-            filename = part.get_filename() or ""
-            if "attachment" in content_disposition and any(
-                ext in filename.lower() for ext in [".xlsx", ".xls", ".csv"]
-            ):
-                attachment_data = part.get_payload(decode=True)
-                print(f"  ✅ Found attachment: {filename} ({len(attachment_data):,} bytes)")
-                mail.store(eid, "+FLAGS", "\\Seen")
-                return attachment_data, filename
+    msg = email.message_from_bytes(msg_data[0][1])
+    print(f"  Processing: {msg.get('Subject', '')} | {msg.get('Date', '')}")
 
-        print(f"  No Excel/CSV attachment in this email")
+    # Extract the download URL from the email body
+    body_text = ""
+    for part in msg.walk():
+        content_type = part.get_content_type()
+        if content_type in ("text/plain", "text/html"):
+            try:
+                body_text += part.get_payload(decode=True).decode("utf-8", errors="replace")
+            except Exception:
+                pass
 
-    print("  No catalog attachment found.")
-    return None, None
+    # Find Qogita's catalog download link — they use a redirect URL
+    # through their email tracking system (email.t.qogita.com) which
+    # eventually redirects to the real S3 file.
+    url_patterns = [
+        r'https://email\.t\.qogita\.com/e/c/[^\s<>"\']+',
+        r'https://email\.m\.qogita\.com/e/c/[^\s<>"\']+',
+        r'https://[^\s<>"\']*qogita[^\s<>"\']*\.xlsx[^\s<>"\']*',
+        r'https://static\.prod\.qogita\.com/files/downloads/[^\s<>"\']+',
+    ]
+
+    download_url = None
+    for pattern in url_patterns:
+        matches = re.findall(pattern, body_text, re.IGNORECASE)
+        if matches:
+            download_url = matches[0]
+            print(f"  Found download URL: {download_url[:80]}...")
+            break
+
+    if not download_url:
+        print("  Could not find download URL in email body.")
+        print(f"  Body snippet (first 1500 chars):")
+        print(body_text[:1500])
+        mail.store(target_id, "+FLAGS", "\\Seen")
+        return None, None
+
+    # Follow redirects to get the actual file
+    print(f"  Downloading catalog file (following redirects)...")
+    r = requests.get(download_url, timeout=120, allow_redirects=True)
+    r.raise_for_status()
+    print(f"  Final URL: {r.url[:100]}")
+    print(f"  Downloaded {len(r.content):,} bytes, Content-Type: {r.headers.get('Content-Type')}")
+
+    # Determine filename from URL or Content-Disposition header
+    filename = "catalog.xlsx"
+    cd = r.headers.get("Content-Disposition", "")
+    fn_match = re.search(r'filename[^;=\n]*=(["\']?)([^"\';\n]+)\1', cd)
+    if fn_match:
+        filename = fn_match.group(2).strip()
+    elif ".csv" in download_url.lower():
+        filename = "catalog.csv"
+
+    print(f"  Filename: {filename}")
+
+    # Mark as read
+    mail.store(target_id, "+FLAGS", "\\Seen")
+    return r.content, filename
 
 
 def parse_excel_catalog(attachment_data, filename):
