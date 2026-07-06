@@ -65,34 +65,33 @@ def connect_gmail():
 def fetch_latest_catalog_attachment(mail):
     mail.select("INBOX")
 
-    # First: diagnostic search — show all recent unread emails from qogita
-    status, messages = mail.search(None, 'FROM "qogita"')
-    if status == "OK" and messages[0]:
-        all_ids = messages[0].split()
-        print(f"  All emails from qogita (read+unread): {len(all_ids)}")
-        # Show subject lines of the last 5
-        for eid in all_ids[-5:]:
-            _, msg_data = mail.fetch(eid, "(BODY[HEADER.FIELDS (FROM SUBJECT DATE FLAGS)])")
-            if msg_data and msg_data[0]:
-                raw = msg_data[0][1].decode("utf-8", errors="replace")
-                print(f"    {raw.strip()[:200]}")
-    else:
-        print("  No emails from qogita found at all — check GMAIL_ADDRESS and App Password")
+    # Diagnostic: show the 10 most recent emails regardless of sender
+    print("  Scanning last 10 emails in inbox for diagnostics...")
+    status, messages = mail.search(None, "ALL")
+    if status != "OK" or not messages[0]:
+        print("  Inbox appears empty or inaccessible")
         return None, None
 
-    # Broader search — unread from qogita, any subject
-    status, messages = mail.search(None, 'FROM "qogita" UNSEEN')
+    all_ids = messages[0].split()
+    print(f"  Total emails in inbox: {len(all_ids)}")
+
+    for eid in all_ids[-10:]:
+        _, msg_data = mail.fetch(eid, "(BODY[HEADER.FIELDS (FROM SUBJECT DATE)])")
+        if msg_data and msg_data[0]:
+            raw = msg_data[0][1].decode("utf-8", errors="replace").strip()
+            print(f"    {raw[:300]}")
+            print()
+
+    # Now search specifically for qogita.com in sender
+    print("  Searching for emails from qogita.com...")
+    status, messages = mail.search(None, 'FROM "qogita.com"')
     if status != "OK" or not messages[0]:
-        print("  No UNREAD emails from qogita — emails may already be marked as read.")
-        print("  Trying ALL emails from qogita instead (read + unread)...")
-        status, messages = mail.search(None, 'FROM "qogita"')
-        if status != "OK" or not messages[0]:
-            return None, None
+        print("  No emails found with FROM containing qogita.com")
+        return None, None
 
     email_ids = messages[0].split()
-    print(f"  Found {len(email_ids)} email(s) to check for attachments")
+    print(f"  Found {len(email_ids)} email(s) from qogita.com")
 
-    # Check most recent first
     for eid in reversed(email_ids[-5:]):
         status, msg_data = mail.fetch(eid, "(RFC822)")
         if status != "OK":
@@ -105,17 +104,18 @@ def fetch_latest_catalog_attachment(mail):
 
         for part in msg.walk():
             content_disposition = str(part.get("Content-Disposition", ""))
-            if "attachment" in content_disposition:
-                filename = part.get_filename() or ""
-                if any(ext in filename.lower() for ext in [".xlsx", ".xls", ".csv"]):
-                    attachment_data = part.get_payload(decode=True)
-                    print(f"  ✅ Found attachment: {filename} ({len(attachment_data):,} bytes)")
-                    mail.store(eid, "+FLAGS", "\\Seen")
-                    return attachment_data, filename
+            filename = part.get_filename() or ""
+            if "attachment" in content_disposition and any(
+                ext in filename.lower() for ext in [".xlsx", ".xls", ".csv"]
+            ):
+                attachment_data = part.get_payload(decode=True)
+                print(f"  ✅ Found attachment: {filename} ({len(attachment_data):,} bytes)")
+                mail.store(eid, "+FLAGS", "\\Seen")
+                return attachment_data, filename
 
         print(f"  No Excel/CSV attachment in this email")
 
-    print("  No catalog attachment found in any recent Qogita emails.")
+    print("  No catalog attachment found.")
     return None, None
 
 
