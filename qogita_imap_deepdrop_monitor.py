@@ -64,49 +64,59 @@ def connect_gmail():
 
 def fetch_latest_catalog_attachment(mail):
     mail.select("INBOX")
-    status, messages = mail.search(
-        None,
-        f'(FROM "{QOGITA_SENDER}" UNSEEN SUBJECT "catalog")'
-    )
-    if status != "OK" or not messages[0]:
-        print("  No new Qogita catalog emails found.")
+
+    # First: diagnostic search — show all recent unread emails from qogita
+    status, messages = mail.search(None, 'FROM "qogita"')
+    if status == "OK" and messages[0]:
+        all_ids = messages[0].split()
+        print(f"  All emails from qogita (read+unread): {len(all_ids)}")
+        # Show subject lines of the last 5
+        for eid in all_ids[-5:]:
+            _, msg_data = mail.fetch(eid, "(BODY[HEADER.FIELDS (FROM SUBJECT DATE FLAGS)])")
+            if msg_data and msg_data[0]:
+                raw = msg_data[0][1].decode("utf-8", errors="replace")
+                print(f"    {raw.strip()[:200]}")
+    else:
+        print("  No emails from qogita found at all — check GMAIL_ADDRESS and App Password")
         return None, None
+
+    # Broader search — unread from qogita, any subject
+    status, messages = mail.search(None, 'FROM "qogita" UNSEEN')
+    if status != "OK" or not messages[0]:
+        print("  No UNREAD emails from qogita — emails may already be marked as read.")
+        print("  Trying ALL emails from qogita instead (read + unread)...")
+        status, messages = mail.search(None, 'FROM "qogita"')
+        if status != "OK" or not messages[0]:
+            return None, None
 
     email_ids = messages[0].split()
-    print(f"  Found {len(email_ids)} unread Qogita catalog email(s)")
+    print(f"  Found {len(email_ids)} email(s) to check for attachments")
 
-    latest_id = email_ids[-1]
-    status, msg_data = mail.fetch(latest_id, "(RFC822)")
-    if status != "OK":
-        return None, None
+    # Check most recent first
+    for eid in reversed(email_ids[-5:]):
+        status, msg_data = mail.fetch(eid, "(RFC822)")
+        if status != "OK":
+            continue
 
-    msg = email.message_from_bytes(msg_data[0][1])
+        msg = email.message_from_bytes(msg_data[0][1])
+        subject = msg.get("Subject", "")
+        sender  = msg.get("From", "")
+        print(f"  Checking: From={sender} | Subject={subject[:80]}")
 
-    attachment_data = None
-    attachment_name = None
+        for part in msg.walk():
+            content_disposition = str(part.get("Content-Disposition", ""))
+            if "attachment" in content_disposition:
+                filename = part.get_filename() or ""
+                if any(ext in filename.lower() for ext in [".xlsx", ".xls", ".csv"]):
+                    attachment_data = part.get_payload(decode=True)
+                    print(f"  ✅ Found attachment: {filename} ({len(attachment_data):,} bytes)")
+                    mail.store(eid, "+FLAGS", "\\Seen")
+                    return attachment_data, filename
 
-    for part in msg.walk():
-        content_disposition = str(part.get("Content-Disposition", ""))
-        if "attachment" in content_disposition:
-            filename = part.get_filename() or ""
-            if any(ext in filename.lower() for ext in [".xlsx", ".xls", ".csv"]):
-                attachment_data = part.get_payload(decode=True)
-                attachment_name = filename
-                print(f"  Found attachment: {filename} ({len(attachment_data):,} bytes)")
-                break
+        print(f"  No Excel/CSV attachment in this email")
 
-    if attachment_data is None:
-        print("  No Excel/CSV attachment found in email.")
-        mail.store(latest_id, "+FLAGS", "\\Seen")
-        return None, None
-
-    mail.store(latest_id, "+FLAGS", "\\Seen")
-    if len(email_ids) > 1:
-        for old_id in email_ids[:-1]:
-            mail.store(old_id, "+FLAGS", "\\Seen")
-        print(f"  Marked {len(email_ids)-1} older catalog email(s) as read")
-
-    return attachment_data, attachment_name
+    print("  No catalog attachment found in any recent Qogita emails.")
+    return None, None
 
 
 def parse_excel_catalog(attachment_data, filename):
