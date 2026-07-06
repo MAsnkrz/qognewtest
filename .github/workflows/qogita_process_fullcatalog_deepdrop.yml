@@ -1,26 +1,26 @@
-name: Qogita Full Catalog Deep Drop Processor
+name: Qogita Full Catalog Deep Drop Trigger
 
-# Triggered by the Cloudflare Worker via repository_dispatch when
-# Qogita's full-catalog download job completes or fails.
-# Only fires Discord alerts for 50%+ price drops.
+# Fires TWO async catalog-download requests covering the entire Qogita
+# catalogue by splitting into Health & Beauty + Home & Garden.
+# Both route to the same processor (qogita_catalog_full_deepdrop)
+# via the Cloudflare Worker. Each runs separately since submitting
+# all 530 slugs at once causes Qogita to generate an incorrect result.
 
 on:
-  repository_dispatch:
-    types: [qogita_catalog_full_deepdrop]
+  schedule:
+    - cron: "45 */2 * * *"
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  process:
+  trigger_health_beauty:
     runs-on: ubuntu-latest
-    timeout-minutes: 60   # large catalog — needs more time to download + parse
-
+    timeout-minutes: 10
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4.2.2
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5.6.0
@@ -30,22 +30,32 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Process catalog download
+      - name: Trigger Health & Beauty catalog download
         env:
-          DISCORD_WEBHOOK_FULLCATALOG_DEEPDROP: ${{ secrets.DISCORD_WEBHOOK_FULLCATALOG_DEEPDROP }}
-          QOGITA_DOWNLOAD_STATUS:               ${{ github.event.client_payload.status }}
-          QOGITA_DOWNLOAD_URL:                  ${{ github.event.client_payload.download_url }}
-          QOGITA_ERROR_MESSAGE:                 ${{ github.event.client_payload.error_message }}
-        run: python qogita_fullcatalog_deepdrop_monitor.py
+          QOGITA_EMAIL:          ${{ secrets.QOGITA_EMAIL }}
+          QOGITA_PASSWORD:       ${{ secrets.QOGITA_PASSWORD }}
+          TOP_LEVEL_CATEGORY:    "Health & Beauty"
+        run: python qogita_catalog_trigger.py
 
-      - name: Commit updated snapshot
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add snapshot_qogita_fullcatalog_deepdrop_prices.json baseline_done_fullcatalog_deepdrop.txt 2>/dev/null || true
-          git stash || true
-          git pull --rebase origin main || true
-          git stash pop || true
-          git add snapshot_qogita_fullcatalog_deepdrop_prices.json baseline_done_fullcatalog_deepdrop.txt 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "chore: update full catalog deepdrop snapshot [skip ci]"
-          git push origin HEAD:main
+  trigger_home_garden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: trigger_health_beauty   # stagger to avoid rate limit
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Trigger Home & Garden catalog download
+        env:
+          QOGITA_EMAIL:          ${{ secrets.QOGITA_EMAIL }}
+          QOGITA_PASSWORD:       ${{ secrets.QOGITA_PASSWORD }}
+          TOP_LEVEL_CATEGORY:    "Home & Garden"
+        run: python qogita_catalog_trigger.py
