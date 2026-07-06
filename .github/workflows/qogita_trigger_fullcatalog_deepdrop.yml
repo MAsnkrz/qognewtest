@@ -1,23 +1,23 @@
 name: Qogita Full Catalog Deep Drop Trigger
 
-# Fires the async catalog-download request covering the ENTIRE Qogita
-# catalogue (all 530 categories submitted as a slug list — confirmed
-# working via testing). Runs every 2 hours. Only the processor fires
-# Discord alerts, and only for drops of 50%+.
+# Fires TWO async catalog-download requests covering the entire Qogita
+# catalogue by splitting into Health & Beauty + Home & Garden.
+# Both route to the same processor (qogita_catalog_full_deepdrop)
+# via the Cloudflare Worker. Each runs separately since submitting
+# all 530 slugs at once causes Qogita to generate an incorrect result.
 
 on:
   schedule:
-    - cron: "45 */2 * * *"   # every 2 hours, offset from others
+    - cron: "45 */2 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  trigger:
+  trigger_health_beauty:
     runs-on: ubuntu-latest
-    timeout-minutes: 10    # fetching 530 slugs + API call needs a bit more time
-
+    timeout-minutes: 10
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4.2.2
@@ -30,9 +30,32 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Trigger full catalog download
+      - name: Trigger Health & Beauty catalog download
         env:
-          QOGITA_EMAIL:    ${{ secrets.QOGITA_EMAIL }}
-          QOGITA_PASSWORD: ${{ secrets.QOGITA_PASSWORD }}
-          ALL_CATEGORIES: "true"
+          QOGITA_EMAIL:          ${{ secrets.QOGITA_EMAIL }}
+          QOGITA_PASSWORD:       ${{ secrets.QOGITA_PASSWORD }}
+          TOP_LEVEL_CATEGORY:    "Health & Beauty"
+        run: python qogita_catalog_trigger.py
+
+  trigger_home_garden:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: trigger_health_beauty   # stagger to avoid rate limit
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Trigger Home & Garden catalog download
+        env:
+          QOGITA_EMAIL:          ${{ secrets.QOGITA_EMAIL }}
+          QOGITA_PASSWORD:       ${{ secrets.QOGITA_PASSWORD }}
+          TOP_LEVEL_CATEGORY:    "Home & Garden"
         run: python qogita_catalog_trigger.py
