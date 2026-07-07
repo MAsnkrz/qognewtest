@@ -199,6 +199,7 @@ def parse_excel_catalog(attachment_data, filename):
         return []
 
     headers = [str(h).strip() if h else "" for h in rows[header_idx]]
+    print(f"  Columns found: {headers}")
     col = {h: i for i, h in enumerate(headers)}
 
     def get(row, key, default=""):
@@ -226,6 +227,15 @@ def parse_excel_catalog(attachment_data, filename):
         qid_m = re.search(r"/products/([A-Za-z0-9]+)/", product_link)
         qid = qid_m.group(1) if qid_m else gtin
 
+        # Try multiple column name variants for image URL
+        image = (
+            get(row, "Image URL") or
+            get(row, "image_url") or
+            get(row, "ImageURL") or
+            get(row, "Image") or
+            ""
+        )
+
         products.append({
             "qid":      qid,
             "barcode":  gtin,
@@ -235,7 +245,7 @@ def parse_excel_catalog(attachment_data, filename):
             "price":    price,
             "stock":    get(row, "Total Inventory of All Offers"),
             "url":      f"https://api.qogita.com/variants/link/{gtin}/",
-            "image":    get(row, "Image URL"),
+            "image":    image,
         })
 
     print(f"  Parsed {len(products):,} products")
