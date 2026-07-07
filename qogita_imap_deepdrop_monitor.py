@@ -252,6 +252,13 @@ def parse_excel_catalog(attachment_data, filename):
     return products
 
 
+def safe_float(val):
+    try:
+        return float(str(val).replace(",", "").replace("£", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_product_image(barcode, auth_headers):
     """
     Fetch product image URL from Qogita's variant link endpoint.
