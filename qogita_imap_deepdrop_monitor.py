@@ -252,7 +252,51 @@ def parse_excel_catalog(attachment_data, filename):
     return products
 
 
-def safe_float(val):
+def fetch_product_image(barcode, auth_headers):
+    """
+    Fetch product image URL from Qogita's variant link endpoint.
+    Only called when a 50%+ drop is detected — not for every product.
+    Returns image URL string or empty string if unavailable.
+    """
+    try:
+        r = requests.get(
+            f"https://api.qogita.com/variants/link/{barcode}/",
+            headers=auth_headers,
+            timeout=10,
+            allow_redirects=True,
+        )
+        if r.ok:
+            data = r.json()
+            # Try common image field names
+            return (
+                data.get("imageUrl") or
+                data.get("image_url") or
+                data.get("image") or
+                ""
+            )
+    except Exception as e:
+        print(f"  [!] Image fetch failed for {barcode}: {e}")
+    return ""
+
+
+def get_auth_headers():
+    """Get a fresh auth token for image lookups."""
+    email    = os.getenv("QOGITA_EMAIL", "dapaplays@gmail.com")
+    password = os.getenv("QOGITA_PASSWORD", "")
+    if not password:
+        return {}
+    try:
+        r = requests.post(
+            "https://api.qogita.com/auth/login/",
+            json={"email": email, "password": password},
+            timeout=15,
+        )
+        r.raise_for_status()
+        token = r.json().get("accessToken") or r.json().get("access")
+        return {"Authorization": f"Bearer {token}"}
+    except Exception as e:
+        print(f"  [!] Qogita auth failed: {e}")
+        return {}
     try:
         return float(str(val).replace(",", "").replace("£", ""))
     except (TypeError, ValueError):
@@ -401,6 +445,7 @@ def main():
     print(f"\n  Comparing {len(products):,} products against baseline...")
     alerts_fired = 0
     new_snapshot = {}
+    auth_headers = None  # lazy-loaded only if a drop is found
 
     for product in products:
         qid = product.get("qid")
@@ -418,6 +463,12 @@ def main():
         pct_change = (old_f - new_f) / old_f
         abs_change = old_f - new_f
         if pct_change >= MIN_DROP_PCT and abs_change >= MIN_ABS_DROP:
+            # Lazy-load auth headers on first drop found
+            if auth_headers is None:
+                auth_headers = get_auth_headers()
+            # Fetch product image only at alert time (not for every product)
+            if auth_headers:
+                product["image"] = fetch_product_image(product.get("barcode", ""), auth_headers)
             notify_deep_drop(product, old_price, new_price, pct_change)
             alerts_fired += 1
             time.sleep(1)
