@@ -234,7 +234,7 @@ def parse_excel_catalog(attachment_data, filename):
             "category": get(row, "Category"),
             "price":    price,
             "stock":    get(row, "Total Inventory of All Offers"),
-            "url":      product_link or f"https://www.qogita.com/products/{qid}/",
+            "url":      f"https://api.qogita.com/variants/link/{gtin}/",
             "image":    get(row, "Image URL"),
         })
 
