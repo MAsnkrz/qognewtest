@@ -37,6 +37,8 @@ jobs:
           GMAIL_ADDRESS:                       ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD:                  ${{ secrets.GMAIL_APP_PASSWORD }}
           DISCORD_WEBHOOK_FULLCATALOG_DEEPDROP: ${{ secrets.DISCORD_WEBHOOK_FULLCATALOG_DEEPDROP }}
+          QOGITA_EMAIL:                        ${{ secrets.QOGITA_EMAIL }}
+          QOGITA_PASSWORD:                     ${{ secrets.QOGITA_PASSWORD }}
         run: python qogita_imap_deepdrop_monitor.py
 
       - name: Commit updated snapshot
