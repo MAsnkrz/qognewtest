@@ -45,13 +45,136 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 
 BRAND_DISPLAY_NAME = "Maybelline"
+BRAND_NAMES        = ["Maybelline", "Maybelline New York"]   # fallback spelling
 SNAPSHOT_FILE    = "snapshot_qogita_maybelline_brand.json"
 BASELINE_FLAG    = "baseline_done_maybelline_brand.txt"
 
+# Passed from Cloudflare Worker via repository_dispatch — OR fetched
+# directly if the monitor runs standalone (webhook.site approach)
 DOWNLOAD_URL     = os.getenv("QOGITA_DOWNLOAD_URL", "")
 DOWNLOAD_STATUS  = os.getenv("QOGITA_DOWNLOAD_STATUS", "completed")
 ERROR_MESSAGE    = os.getenv("QOGITA_ERROR_MESSAGE", "")
 DISCORD_WEBHOOK  = os.getenv("DISCORD_WEBHOOK_MAYBELLINE", "")
+
+QOGITA_EMAIL    = os.getenv("QOGITA_EMAIL", "")
+QOGITA_PASSWORD = os.getenv("QOGITA_PASSWORD", "")
+API_BASE        = "https://api.qogita.com"
+
+# ---------------------------------------------------------------------------
+# QOGITA AUTH + CATALOG TRIGGER (used when QOGITA_DOWNLOAD_URL not set)
+# ---------------------------------------------------------------------------
+
+_token_cache = {"token": None, "expires": 0}
+
+
+def get_token():
+    now = time.time()
+    if _token_cache["token"] and now < _token_cache["expires"]:
+        return _token_cache["token"]
+    print("  Authenticating with Qogita API...")
+    r = requests.post(f"{API_BASE}/auth/login/",
+                      json={"email": QOGITA_EMAIL, "password": QOGITA_PASSWORD},
+                      timeout=15)
+    r.raise_for_status()
+    data  = r.json()
+    token = data.get("accessToken") or data.get("access")
+    if not token:
+        raise ValueError(f"No token in response: {data}")
+    _token_cache["token"]   = token
+    _token_cache["expires"] = now + 3300
+    print("  Authenticated successfully")
+    return token
+
+
+def trigger_catalog_and_get_url(brand_name):
+    """
+    Trigger async catalog download via POST /public/buyers/catalog-downloads/
+    and poll webhook.site for the result.
+    Returns the S3 download URL or None on failure.
+    """
+    # Create temp webhook receiver
+    try:
+        ws = requests.post("https://webhook.site/token",
+                           json={"default_status": 200, "default_content": "OK", "timeout": 0},
+                           timeout=15)
+        ws.raise_for_status()
+        token_uuid  = ws.json()["uuid"]
+        webhook_url = f"https://webhook.site/{token_uuid}"
+        print(f"  Webhook receiver: {webhook_url}")
+    except Exception as e:
+        print(f"  [!] webhook.site error: {e}")
+        return None
+
+    # Trigger catalog download
+    headers = {"Authorization": f"Bearer {get_token()}"}
+    try:
+        r = requests.post(f"{API_BASE}/public/buyers/catalog-downloads/",
+                          headers=headers,
+                          json={"brand_names": [brand_name], "webhookUrl": webhook_url},
+                          timeout=15)
+    except Exception as e:
+        print(f"  [!] Trigger error: {e}")
+        return None
+
+    if r.status_code == 429:
+        wait = int(r.headers.get("Retry-After", 60))
+        print(f"  [!] Rate limited — waiting {wait}s")
+        time.sleep(wait)
+        try:
+            r = requests.post(f"{API_BASE}/public/buyers/catalog-downloads/",
+                              headers=headers,
+                              json={"brand_names": [brand_name], "webhookUrl": webhook_url},
+                              timeout=15)
+        except Exception as e:
+            return None
+
+    if not r.ok:
+        print(f"  [!] Trigger failed: HTTP {r.status_code} — {r.text[:200]}")
+        return None
+
+    correlation_id = r.json().get("catalogRequestId", "unknown")
+    print(f"  Catalog job started (ID: {correlation_id}) — polling for result...")
+
+    # Poll webhook.site until Qogita delivers the download link
+    for attempt in range(40):  # 40 × 30s = 20 minutes max
+        time.sleep(30)
+        elapsed = (attempt + 1) * 30
+        print(f"  [{elapsed}s] Polling...", end=" ", flush=True)
+        try:
+            poll = requests.get(f"https://webhook.site/token/{token_uuid}/requests",
+                                params={"page": 1, "sorting": "newest"}, timeout=15)
+            poll.raise_for_status()
+            items = poll.json().get("data", [])
+        except Exception as e:
+            print(f"poll error: {e}")
+            continue
+
+        if not items:
+            print("no callback yet")
+            continue
+
+        raw = items[0].get("content", "")
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            print("non-JSON")
+            continue
+
+        event_type = payload.get("event_type") or payload.get("type") or ""
+        print(f"event: {event_type}")
+
+        if "completed" in event_type.lower():
+            url = (payload.get("data", {}).get("download_url") or
+                   payload.get("downloadUrl") or payload.get("url") or "")
+            if url:
+                return url
+            print(f"  No download_url in: {list(payload.keys())}")
+        elif "failed" in event_type.lower():
+            print(f"  [!] Catalog generation failed: {raw[:200]}")
+            return None
+
+    print("  [!] Timed out waiting for catalog")
+    return None
 
 COLOUR_NEW     = 0xE91E8C
 COLOUR_BACK    = 0x9B59B6
@@ -413,24 +536,38 @@ def check_changes(product, old):
 
 def main():
     print("=" * 55)
-    print(f"  Qogita {BRAND_DISPLAY_NAME} Brand Monitor (webhook-driven)")
+    print(f"  Qogita {BRAND_DISPLAY_NAME} Brand Monitor")
     print("=" * 55)
 
     if not DISCORD_WEBHOOK:
         print("  [!] DISCORD_WEBHOOK_MAYBELLINE must be set")
         sys.exit(1)
 
+    # If triggered via Cloudflare Worker, DOWNLOAD_URL is already set.
+    # If running standalone, trigger the catalog download ourselves.
+    download_url = DOWNLOAD_URL
+
     if DOWNLOAD_STATUS == "failed":
         print(f"  Catalog generation failed: {ERROR_MESSAGE}")
         notify_download_failed()
         sys.exit(0)
 
-    if not DOWNLOAD_URL:
-        print("  [!] QOGITA_DOWNLOAD_URL must be set when status is 'completed'")
-        sys.exit(1)
+    if not download_url:
+        if not QOGITA_EMAIL or not QOGITA_PASSWORD:
+            print("  [!] Set QOGITA_EMAIL + QOGITA_PASSWORD to trigger catalog download")
+            sys.exit(1)
+        print(f"  No QOGITA_DOWNLOAD_URL — triggering catalog download via API...")
+        for brand_name in BRAND_NAMES:
+            print(f"  Trying brand_name='{brand_name}'...")
+            download_url = trigger_catalog_and_get_url(brand_name)
+            if download_url:
+                break
+        if not download_url:
+            print("  [!] Could not obtain catalog download URL — aborting")
+            sys.exit(1)
 
     print(f"  Downloading catalog CSV...")
-    csv_text = fetch_csv(DOWNLOAD_URL)
+    csv_text = fetch_csv(download_url)
     products = parse_catalog_csv(csv_text)
     print(f"  Parsed {len(products)} products")
 
