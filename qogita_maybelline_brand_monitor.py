@@ -1,6 +1,6 @@
 """
 Maybelline Brand Monitor — Webhook-driven version.
-
+h
 This script is invoked by a GitHub Actions workflow that triggers on
 `repository_dispatch` (event_type: qogita_catalog_maybelline), fired by a
 Cloudflare Worker when Qogita's async catalog-download job (filtered
@@ -523,7 +523,7 @@ def check_changes(product, old):
             # Guard against re-alerting the same drop twice when two runs
             # overlap before the first run's snapshot commit lands in git.
             last_alerted = old.get("last_alerted_price", "")
-            if last_alerted and abs(safe_float(last_alerted) or 0 - (new_f or 0)) < 0.01:
+            if last_alerted and abs((safe_float(last_alerted) or 0) - (new_f or 0)) < 0.01:
                 pass  # same price already alerted — skip
             else:
                 product["last_alerted_price"] = new_price
