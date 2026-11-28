@@ -400,7 +400,7 @@ def check_changes(product, old):
             # Guard against re-alerting the same drop twice when two runs
             # overlap before the first run's snapshot commit lands in git.
             last_alerted = old.get("last_alerted_price", "")
-            if last_alerted and abs(safe_float(last_alerted) or 0 - (new_f or 0)) < 0.01:
+            if last_alerted and abs((safe_float(last_alerted) or 0) - (new_f or 0)) < 0.01:
                 pass  # same price already alerted — skip
             else:
                 product["last_alerted_price"] = new_price
@@ -471,6 +471,9 @@ def main():
             check_changes(product, old)
             entry = snapshot_entry(product)
             entry["first_seen"] = old.get("first_seen", entry["first_seen"])
+            # Preserve last_alerted_price — don't wipe it when check_changes skips the alert
+            if not entry.get("last_alerted_price"):
+                entry["last_alerted_price"] = old.get("last_alerted_price", "")
             snapshot[qid] = entry
 
     save_snapshot(snapshot)
