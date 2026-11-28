@@ -608,6 +608,9 @@ def main():
             check_changes(product, old)
             entry = snapshot_entry(product)
             entry["first_seen"] = old.get("first_seen", entry["first_seen"])
+            # Preserve last_alerted_price — don't wipe it when check_changes skips the alert
+            if not entry.get("last_alerted_price"):
+                entry["last_alerted_price"] = old.get("last_alerted_price", "")
             snapshot[qid] = entry
 
     save_snapshot(snapshot)
