@@ -1,10 +1,14 @@
-name: Qogita L'Oreal Catalog Processor
+name: Qogita L'Oréal Brand Monitor
 
-# Triggered by the Cloudflare Worker via repository_dispatch when
-# Qogita's async catalog-download job for L'Oréal completes or fails.
-# Do not add a schedule here — see qogita_trigger_loreal.yml for that.
+# Runs on a schedule (self-fetches via new Qogita export API) and also
+# accepts repository_dispatch from the Cloudflare Worker (legacy webhook flow).
+# When QOGITA_DOWNLOAD_URL is set the script uses it directly; when absent
+# it self-fetches using QOGITA_EMAIL / QOGITA_PASSWORD.
 
 on:
+  schedule:
+    - cron: "15 */2 * * *"   # every 2 hours
+  workflow_dispatch:
   repository_dispatch:
     types: [qogita_catalog_loreal]
 
@@ -14,7 +18,8 @@ permissions:
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4.2.2
@@ -29,9 +34,11 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Process catalog download
+      - name: Process brand export
         env:
-          DISCORD_WEBHOOK_LOREAL:  ${{ secrets.DISCORD_WEBHOOK_LOREAL }}
+          DISCORD_WEBHOOK_LOREAL: ${{ secrets.DISCORD_WEBHOOK_LOREAL }}
+          QOGITA_EMAIL:            ${{ secrets.QOGITA_EMAIL }}
+          QOGITA_PASSWORD:         ${{ secrets.QOGITA_PASSWORD }}
           QOGITA_DOWNLOAD_STATUS:  ${{ github.event.client_payload.status }}
           QOGITA_DOWNLOAD_URL:     ${{ github.event.client_payload.download_url }}
           QOGITA_ERROR_MESSAGE:    ${{ github.event.client_payload.error_message }}
