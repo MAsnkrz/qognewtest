@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 BRAND_DISPLAY_NAME = "Maybelline"
 BRAND_NAMES        = ["Maybelline", "Maybelline New York"]   # fallback spelling
-BRAND_SLUG    = "maybelline-new-york"  # Qogita API brand slug for /v1/buyers/product-exports/
+BRAND_SLUG    = "maybelline"  # Qogita API brand slug for /v1/buyers/product-exports/
 SNAPSHOT_FILE    = "snapshot_qogita_maybelline_brand.json"
 BASELINE_FLAG    = "baseline_done_maybelline_brand.txt"
 
@@ -100,7 +100,7 @@ def fetch_brand_export_direct(brand_slug):
     the value the 'brands' filter accepts. Run once and check the brand_slug
     column of the downloaded CSV to confirm the correct slug.
     """
-    headers = {"Authorization": f"Bearer {get_token()}"}
+    headers = {"Authorization": f"Token {get_token()}"}
 
     print(f"  Requesting brand export (slug='{brand_slug}')...")
     try:

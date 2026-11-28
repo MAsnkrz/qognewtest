@@ -96,7 +96,7 @@ def fetch_brand_export_direct(brand_slug):
     the value the 'brands' filter accepts. Run once and check the brand_slug
     column of the downloaded CSV to confirm the correct slug.
     """
-    headers = {"Authorization": f"Bearer {get_token()}"}
+    headers = {"Authorization": f"Token {get_token()}"}
 
     print(f"  Requesting brand export (slug='{brand_slug}')...")
     try:
