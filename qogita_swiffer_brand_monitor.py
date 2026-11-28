@@ -46,12 +46,205 @@ from datetime import datetime, timezone
 
 BRAND_DISPLAY_NAME = "Swiffer"
 SNAPSHOT_FILE    = "snapshot_qogita_swiffer_brand.json"
+BRAND_SLUG    = "swiffer"  # Qogita API brand slug for /v1/buyers/product-exports/
 BASELINE_FLAG    = "baseline_done_swiffer_brand.txt"
 
 DOWNLOAD_URL     = os.getenv("QOGITA_DOWNLOAD_URL", "")
 DOWNLOAD_STATUS  = os.getenv("QOGITA_DOWNLOAD_STATUS", "completed")
 ERROR_MESSAGE    = os.getenv("QOGITA_ERROR_MESSAGE", "")
 DISCORD_WEBHOOK  = os.getenv("DISCORD_WEBHOOK_SWIFFER", "")
+
+QOGITA_EMAIL    = os.getenv("QOGITA_EMAIL", "")
+QOGITA_PASSWORD = os.getenv("QOGITA_PASSWORD", "")
+API_BASE        = "https://api.qogita.com"
+
+
+# ---------------------------------------------------------------------------
+# QOGITA AUTH + DIRECT BRAND EXPORT (new /v1/buyers/product-exports/ API)
+# ---------------------------------------------------------------------------
+
+_token_cache = {"token": None, "expires": 0}
+
+def get_token():
+    now = time.time()
+    if _token_cache["token"] and now < _token_cache["expires"]:
+        return _token_cache["token"]
+    if not QOGITA_EMAIL or not QOGITA_PASSWORD:
+        raise ValueError("QOGITA_EMAIL and QOGITA_PASSWORD must be set for self-fetch mode")
+    print("  Authenticating with Qogita API...")
+    r = requests.post(f"{API_BASE}/auth/login/",
+                      json={"email": QOGITA_EMAIL, "password": QOGITA_PASSWORD},
+                      timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    token = data.get("accessToken") or data.get("access")
+    if not token:
+        raise ValueError(f"No token in login response: {data}")
+    _token_cache["token"] = token
+    _token_cache["expires"] = now + 3300
+    print("  Authenticated successfully")
+    return token
+
+
+def fetch_brand_export_direct(brand_slug):
+    """
+    Use POST /v1/buyers/product-exports/ to request a brand-filtered CSV.
+    Much faster than the old catalog-download webhook approach — no Cloudflare
+    Worker or webhook.site needed. Returns the download URL or None.
+
+    brand_slug: the brand's API slug (e.g. 'maybelline-new-york'), which is
+    the value the 'brands' filter accepts. Run once and check the brand_slug
+    column of the downloaded CSV to confirm the correct slug.
+    """
+    headers = {"Authorization": f"Bearer {get_token()}"}
+
+    print(f"  Requesting brand export (slug='{brand_slug}')...")
+    try:
+        r = requests.post(
+            f"{API_BASE}/v1/buyers/product-exports/",
+            headers=headers,
+            json={"brands": [brand_slug]},
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"  [!] Export request error: {e}")
+        return None
+
+    if r.status_code == 429:
+        wait = int(r.headers.get("Retry-After", 60))
+        print(f"  Rate limited — waiting {wait}s")
+        time.sleep(wait)
+        try:
+            r = requests.post(
+                f"{API_BASE}/v1/buyers/product-exports/",
+                headers=headers,
+                json={"brands": [brand_slug]},
+                timeout=30,
+            )
+        except Exception as e:
+            print(f"  [!] Export retry error: {e}")
+            return None
+
+    export_id = None
+    if r.status_code == 409:
+        body = r.json()
+        code = body.get("code", "")
+        if code == "export_in_progress":
+            export_id = body.get("active_export_id")
+            print(f"  Export already in progress (ID: {export_id}) — polling...")
+        else:
+            print(f"  [!] 409 conflict: {body}")
+            return None
+    elif not r.ok:
+        print(f"  [!] Export request failed: HTTP {r.status_code} — {r.text[:200]}")
+        return None
+    else:
+        data = r.json()
+        export_id = data.get("id")
+        status = data.get("status", "pending")
+        # Already succeeded (cached recent export with same filters)
+        if status == "succeeded":
+            url = data.get("download_url")
+            if url:
+                print(f"  Export ready immediately (cached).")
+                return url
+        print(f"  Export queued (ID: {export_id}, status: {status}) — polling...")
+
+    if not export_id:
+        print(f"  [!] No export ID obtained from response")
+        return None
+
+    # Poll until succeeded or failed (wait 10s between reads per API docs)
+    for attempt in range(60):  # 60 × 10s = 10 minutes max
+        time.sleep(10)
+        elapsed = (attempt + 1) * 10
+        try:
+            poll = requests.get(
+                f"{API_BASE}/v1/buyers/product-exports/{export_id}/",
+                headers=headers,
+                timeout=15,
+            )
+            poll.raise_for_status()
+        except Exception as e:
+            print(f"  [{elapsed}s] Poll error: {e}")
+            continue
+
+        pdata = poll.json()
+        status = pdata.get("status", "unknown")
+        print(f"  [{elapsed}s] Status: {status}")
+
+        if status == "succeeded":
+            url = pdata.get("download_url")
+            if url:
+                return url
+            print(f"  [!] succeeded but no download_url in: {list(pdata.keys())}")
+            return None
+        elif status == "failed":
+            err = pdata.get("error") or {}
+            print(f"  [!] Export failed: {err.get('code','?')} — {err.get('message','')}")
+            return None
+        # else: pending or running — keep polling
+
+    print(f"  [!] Timed out after 10 minutes waiting for brand export")
+    return None
+
+
+def parse_new_export_csv(csv_text):
+    """
+    Parse the new /v1/buyers/product-exports/ CSV format.
+    Key differences from the old catalog-download CSV:
+    - Column names are snake_case (gtin, name, brand_name, category_name…)
+    - lowest_price_amount is in CENTS — divide by 100 for account currency
+    - image_urls is multiple URLs joined by '|' — take first
+    - in_stock derived from total_inventory > 0
+    """
+    reader = csv.DictReader(io.StringIO(csv_text))
+    products = []
+    for row in reader:
+        gtin = (row.get("gtin", "") or "").strip()
+        if not gtin:
+            continue
+
+        product_url = (row.get("product_url", "") or "").strip()
+        # New API uses /variants/link/{gtin}/ URLs — use GTIN as stable ID
+        qid = gtin
+
+        total_inventory = _safe_int(row.get("total_inventory", ""))
+        cheapest_inventory = _safe_int(row.get("lowest_price_offer_inventory", ""))
+        offer_count = _safe_int(row.get("offer_count", "")) or 0
+
+        # Price is in cents — convert to account currency units (e.g. £ for GBP)
+        price_cents = _safe_int(row.get("lowest_price_amount", ""))
+        price_str = f"{price_cents / 100:.2f}" if price_cents is not None else ""
+
+        # Image — take first from pipe-separated list
+        image_raw = (row.get("image_urls", "") or "").strip()
+        image = image_raw.split("|")[0].strip() if image_raw else ""
+
+        # Bundle size (unit_size from cheapest offer)
+        bundle_size = str(row.get("lowest_price_offer_unit_size", "") or "").strip()
+
+        is_preorder = str(row.get("is_pre_order", "") or "").strip().lower() == "true"
+
+        products.append({
+            "qid": qid,
+            "title": (row.get("name", "") or "").strip(),
+            "category": (row.get("category_name", "") or "").strip(),
+            "brand": (row.get("brand_name", "") or "").strip(),
+            "url": product_url or f"https://www.qogita.com/variants/link/{gtin}/",
+            "image": image,
+            "barcode": gtin,
+            "price": price_str,
+            "bundle_size": bundle_size,
+            "cheapest_stock": cheapest_inventory,
+            "stock": total_inventory,
+            "all_offers": offer_count,
+            "is_preorder": is_preorder,
+            "delivery_weeks": str(row.get("estimated_delivery_time_weeks", "") or "").strip(),
+            "in_stock": (total_inventory or 0) > 0,
+        })
+    return products
+
 
 COLOUR_NEW     = 0xE91E8C
 COLOUR_BACK    = 0x9B59B6
@@ -425,13 +618,27 @@ def main():
         notify_download_failed()
         sys.exit(0)
 
-    if not DOWNLOAD_URL:
-        print("  [!] QOGITA_DOWNLOAD_URL must be set when status is 'completed'")
-        sys.exit(1)
+    download_url = DOWNLOAD_URL
+
+    if not download_url:
+        if not QOGITA_EMAIL or not QOGITA_PASSWORD:
+            print("  [!] Set QOGITA_EMAIL + QOGITA_PASSWORD to self-fetch brand export")
+            sys.exit(1)
+        print(f"  No QOGITA_DOWNLOAD_URL — fetching brand export via new API...")
+        download_url = fetch_brand_export_direct(BRAND_SLUG)
+        if not download_url:
+            print("  [!] Could not obtain brand export URL — check BRAND_SLUG is correct")
+            sys.exit(1)
 
     print(f"  Downloading catalog CSV...")
-    csv_text = fetch_csv(DOWNLOAD_URL)
-    products = parse_catalog_csv(csv_text)
+    csv_text = fetch_csv(download_url)
+    # Auto-detect CSV format: new API export has lowercase "gtin" header
+    if csv_text[:500].strip().lower().startswith("gtin,") or "\ngtin," in csv_text[:500].lower():
+        print("  Detected new API export format (snake_case columns)")
+        products = parse_new_export_csv(csv_text)
+    else:
+        print("  Detected legacy catalog-download format")
+        products = parse_catalog_csv(csv_text)
     print(f"  Parsed {len(products)} products")
 
     if not products:
