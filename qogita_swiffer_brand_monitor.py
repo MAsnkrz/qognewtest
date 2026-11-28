@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 BRAND_DISPLAY_NAME = "Swiffer"
 SNAPSHOT_FILE    = "snapshot_qogita_swiffer_brand.json"
-BRAND_SLUG    = "swiffer"  # Qogita API brand slug for /v1/buyers/product-exports/
+BRAND_NAMES   = ['Swiffer']  # used by /public/buyers/catalog-downloads/
 BASELINE_FLAG    = "baseline_done_swiffer_brand.txt"
 
 DOWNLOAD_URL     = os.getenv("QOGITA_DOWNLOAD_URL", "")
@@ -60,7 +60,7 @@ API_BASE        = "https://api.qogita.com"
 
 
 # ---------------------------------------------------------------------------
-# QOGITA AUTH + DIRECT BRAND EXPORT (new /v1/buyers/product-exports/ API)
+# QOGITA AUTH + BRAND EXPORT (via /public/buyers/catalog-downloads/ + webhook.site)
 # ---------------------------------------------------------------------------
 
 _token_cache = {"token": None, "expires": 0}
@@ -86,29 +86,92 @@ def get_token():
     return token
 
 
-def fetch_brand_export_direct(brand_slug):
+def fetch_brand_export_webhook(brand_names):
     """
-    Use POST /v1/buyers/product-exports/ to request a brand-filtered CSV.
-    Much faster than the old catalog-download webhook approach — no Cloudflare
-    Worker or webhook.site needed. Returns the download URL or None.
-
-    brand_slug: the brand's API slug (e.g. 'maybelline-new-york'), which is
-    the value the 'brands' filter accepts. Run once and check the brand_slug
-    column of the downloaded CSV to confirm the correct slug.
+    Trigger a brand-filtered catalog download via POST /public/buyers/catalog-downloads/
+    and self-poll webhook.site for the async callback. Returns the download URL or None.
+    brand_names: list of brand name strings, e.g. ["Mustela"]
     """
-    headers = {"Authorization": f"Token {get_token()}"}
+    # Create a temporary webhook.site token to receive the callback
+    try:
+        wh = requests.post(
+            "https://webhook.site/token",
+            json={"default_status": 200, "default_content": "ok", "timeout": 0},
+            timeout=15,
+        )
+        wh.raise_for_status()
+        wh_uuid = wh.json()["uuid"]
+    except Exception as e:
+        print(f"  [!] Could not create webhook.site token: {e}")
+        return None
 
-    print(f"  Requesting brand export (slug='{brand_slug}')...")
+    webhook_url = f"https://webhook.site/{wh_uuid}"
+    print(f"  Webhook.site token created: {wh_uuid}")
+
+    # Trigger the catalog download
+    headers = {"Authorization": f"Bearer {get_token()}"}
+    print(f"  Requesting catalog download for {brand_names}...")
     try:
         r = requests.post(
-            f"{API_BASE}/v1/buyers/product-exports/",
+            f"{API_BASE}/public/buyers/catalog-downloads/",
             headers=headers,
-            json={"brands": [brand_slug]},
+            json={"brand_names": brand_names, "webhookUrl": webhook_url},
             timeout=30,
         )
     except Exception as e:
-        print(f"  [!] Export request error: {e}")
+        print(f"  [!] Catalog download request error: {e}")
         return None
+
+    if not r.ok:
+        print(f"  [!] Catalog download request failed: HTTP {r.status_code} — {r.text[:300]}")
+        return None
+
+    print(f"  Catalog download triggered (HTTP {r.status_code}). Polling webhook.site for up to 20 min...")
+
+    # Poll webhook.site until Qogita delivers the callback
+    for attempt in range(120):  # 120 × 10s = 20 minutes max
+        time.sleep(10)
+        elapsed = (attempt + 1) * 10
+        try:
+            poll = requests.get(
+                f"https://webhook.site/token/{wh_uuid}/requests?page=1&per_page=1&sorting=newest",
+                timeout=15,
+            )
+            poll.raise_for_status()
+            data = poll.json()
+        except Exception as e:
+            print(f"  [{elapsed}s] Poll error: {e}")
+            continue
+
+        requests_list = data.get("data", [])
+        if not requests_list:
+            if elapsed % 60 == 0:
+                print(f"  [{elapsed}s] Still waiting for Qogita callback...")
+            continue
+
+        # Got a callback — parse it
+        body_str = requests_list[0].get("content", "{}")
+        try:
+            body = json.loads(body_str)
+        except Exception:
+            print(f"  [{elapsed}s] Could not parse webhook body: {body_str[:200]}")
+            continue
+
+        status = body.get("status", "")
+        download_url = body.get("download_url") or body.get("downloadUrl", "")
+        print(f"  [{elapsed}s] Callback received — status={status!r}, url={'yes' if download_url else 'no'}")
+
+        if download_url and status in ("completed", ""):
+            return download_url
+        elif status == "failed":
+            err = body.get("error") or body.get("message", "")
+            print(f"  [!] Qogita reported failure: {err}")
+            return None
+        # else: unexpected body — log and keep waiting
+        print(f"  Unexpected callback body keys: {list(body.keys())}")
+
+    print("  [!] Timed out after 20 minutes waiting for Qogita webhook callback")
+    return None
 
     if r.status_code == 429:
         wait = int(r.headers.get("Retry-After", 60))
@@ -188,62 +251,6 @@ def fetch_brand_export_direct(brand_slug):
     print(f"  [!] Timed out after 10 minutes waiting for brand export")
     return None
 
-
-def parse_new_export_csv(csv_text):
-    """
-    Parse the new /v1/buyers/product-exports/ CSV format.
-    Key differences from the old catalog-download CSV:
-    - Column names are snake_case (gtin, name, brand_name, category_name…)
-    - lowest_price_amount is in CENTS — divide by 100 for account currency
-    - image_urls is multiple URLs joined by '|' — take first
-    - in_stock derived from total_inventory > 0
-    """
-    reader = csv.DictReader(io.StringIO(csv_text))
-    products = []
-    for row in reader:
-        gtin = (row.get("gtin", "") or "").strip()
-        if not gtin:
-            continue
-
-        product_url = (row.get("product_url", "") or "").strip()
-        # New API uses /variants/link/{gtin}/ URLs — use GTIN as stable ID
-        qid = gtin
-
-        total_inventory = _safe_int(row.get("total_inventory", ""))
-        cheapest_inventory = _safe_int(row.get("lowest_price_offer_inventory", ""))
-        offer_count = _safe_int(row.get("offer_count", "")) or 0
-
-        # Price is in cents — convert to account currency units (e.g. £ for GBP)
-        price_cents = _safe_int(row.get("lowest_price_amount", ""))
-        price_str = f"{price_cents / 100:.2f}" if price_cents is not None else ""
-
-        # Image — take first from pipe-separated list
-        image_raw = (row.get("image_urls", "") or "").strip()
-        image = image_raw.split("|")[0].strip() if image_raw else ""
-
-        # Bundle size (unit_size from cheapest offer)
-        bundle_size = str(row.get("lowest_price_offer_unit_size", "") or "").strip()
-
-        is_preorder = str(row.get("is_pre_order", "") or "").strip().lower() == "true"
-
-        products.append({
-            "qid": qid,
-            "title": (row.get("name", "") or "").strip(),
-            "category": (row.get("category_name", "") or "").strip(),
-            "brand": (row.get("brand_name", "") or "").strip(),
-            "url": product_url or f"https://www.qogita.com/variants/link/{gtin}/",
-            "image": image,
-            "barcode": gtin,
-            "price": price_str,
-            "bundle_size": bundle_size,
-            "cheapest_stock": cheapest_inventory,
-            "stock": total_inventory,
-            "all_offers": offer_count,
-            "is_preorder": is_preorder,
-            "delivery_weeks": str(row.get("estimated_delivery_time_weeks", "") or "").strip(),
-            "in_stock": (total_inventory or 0) > 0,
-        })
-    return products
 
 
 COLOUR_NEW     = 0xE91E8C
@@ -624,21 +631,15 @@ def main():
         if not QOGITA_EMAIL or not QOGITA_PASSWORD:
             print("  [!] Set QOGITA_EMAIL + QOGITA_PASSWORD to self-fetch brand export")
             sys.exit(1)
-        print(f"  No QOGITA_DOWNLOAD_URL — fetching brand export via new API...")
-        download_url = fetch_brand_export_direct(BRAND_SLUG)
+        print(f"  No QOGITA_DOWNLOAD_URL — triggering catalog download via Qogita API...")
+        download_url = fetch_brand_export_webhook(BRAND_NAMES)
         if not download_url:
-            print("  [!] Could not obtain brand export URL — check BRAND_SLUG is correct")
+            print("  [!] Could not obtain brand export URL")
             sys.exit(1)
 
     print(f"  Downloading catalog CSV...")
     csv_text = fetch_csv(download_url)
-    # Auto-detect CSV format: new API export has lowercase "gtin" header
-    if csv_text[:500].strip().lower().startswith("gtin,") or "\ngtin," in csv_text[:500].lower():
-        print("  Detected new API export format (snake_case columns)")
-        products = parse_new_export_csv(csv_text)
-    else:
-        print("  Detected legacy catalog-download format")
-        products = parse_catalog_csv(csv_text)
+    products = parse_catalog_csv(csv_text)
     print(f"  Parsed {len(products)} products")
 
     if not products:
